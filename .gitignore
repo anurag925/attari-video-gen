@@ -1,0 +1,21 @@
+.DS_Store
+
+# Environment files
+.env
+
+# Go build and test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+
+# Local binaries
+/video-maker
+/subtitles-test
+
+# Generated media and working files
+/assets/
