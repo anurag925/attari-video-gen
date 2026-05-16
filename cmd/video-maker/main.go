@@ -248,6 +248,75 @@ func main() {
 	}
 
 	slog.Info("TTS audio generated", "path", audioPath)
+
+	// Burn subtitles into the cut video.
+	var videoWithSubsPath string
+	if state.SubtitlesBurned && fileExists(state.VideoWithSubsPath) {
+		videoWithSubsPath = state.VideoWithSubsPath
+		slog.Info("Skipping subtitle burn", "path", videoWithSubsPath)
+	} else {
+		subtitledOutputPath := artifactPathFromState(workDir, baseOutputName(input.OutputName)+"-subtitled.mp4", state.CutVideoPath, cutVideoPath)
+		slog.Info("Burning subtitles into video", "video", cutVideoPath, "subtitles", state.SubtitlesPath)
+		videoWithSubsPath, err = video.AddSubtitles(ctx, video.Config{
+			WorkingDir: workDir,
+			OutputPath: subtitledOutputPath,
+		}, cutVideoPath, state.SubtitlesPath)
+		if err != nil {
+			slog.Info("Error burning subtitles", "error", err)
+			os.Exit(1)
+		}
+
+		state.VideoWithSubsPath = videoWithSubsPath
+		state.SubtitlesBurned = true
+		if err := savePipelineState(statePath, state); err != nil {
+			slog.Info("Error saving pipeline state", "error", err)
+			os.Exit(1)
+		}
+	}
+	if videoWithSubsPath == "" {
+		videoWithSubsPath = state.VideoWithSubsPath
+	}
+	if videoWithSubsPath == "" {
+		slog.Info("Missing subtitled video path after subtitle burn")
+		os.Exit(1)
+	}
+	if state.VideoWithSubsPath != videoWithSubsPath {
+		state.VideoWithSubsPath = videoWithSubsPath
+		if err := savePipelineState(statePath, state); err != nil {
+			slog.Info("Error saving pipeline state", "error", err)
+			os.Exit(1)
+		}
+	}
+	slog.Info("Subtitled video ready", "path", videoWithSubsPath)
+
+	// Merge the subtitled video with the generated audio.
+	var finalPath string
+	if state.MergeDone && fileExists(state.FinalPath) {
+		finalPath = state.FinalPath
+		slog.Info("Skipping audio merge", "path", finalPath)
+	} else {
+		finalOutputPath := artifactPathFromState(workDir, input.OutputName, state.VideoWithSubsPath, videoWithSubsPath)
+		slog.Info("Merging subtitled video with audio", "video", videoWithSubsPath, "audio", audioPath)
+		finalPath, err = video.MergeAudioVideo(ctx, video.Config{
+			WorkingDir: workDir,
+			OutputPath: finalOutputPath,
+		}, videoWithSubsPath, audioPath, baseOutputName(input.OutputName))
+		if err != nil {
+			slog.Info("Error merging audio and video", "error", err)
+			os.Exit(1)
+		}
+
+		state.FinalPath = finalPath
+		state.MergeDone = true
+		if err := savePipelineState(statePath, state); err != nil {
+			slog.Info("Error saving pipeline state", "error", err)
+			os.Exit(1)
+		}
+	}
+	if finalPath == "" {
+		finalPath = state.FinalPath
+	}
+	slog.Info("Final video ready", "path", finalPath)
 }
 
 func parseInputFile(path string) (*Input, error) {
