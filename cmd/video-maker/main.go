@@ -39,11 +39,13 @@ func main() {
 		log.Fatal("error reading .env file, proceeding with environment variables only")
 	}
 
-	apiKey, model, baseURL, err := agents.ResolveLLMConfig()
+	// Create LLM client based on environment configuration
+	llm, err := agents.NewLLMClient()
 	if err != nil {
-		slog.Info("Error resolving LLM config", "error", err)
+		slog.Info("Error creating LLM client", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("LLM client created", "provider", agents.DetectProvider())
 
 	// Read and parse input file
 	input, err := config.ParseInputFile(flagInput)
@@ -171,10 +173,7 @@ func main() {
 		}
 		slog.Info("Skipping text summarization", "text_length", len(summarizedText))
 	} else {
-		summarizedText, err = agents.GenerateVideoSummary(ctx, agents.Config{
-			APIKey:   apiKey,
-			Model:    model,
-			BaseURL:  baseURL,
+		summarizedText, err = agents.GenerateVideoSummary(ctx, llm, agents.Config{
 			Text:     sourceText,
 			Duration: input.Duration,
 		})

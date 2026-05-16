@@ -4,33 +4,25 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/tmc/langchaingo/llms"
-	"github.com/tmc/langchaingo/llms/openai"
 )
 
 const (
 	wordsPerMinute = 130
 )
 
+// Config holds the configuration for video summary generation.
 type Config struct {
-	APIKey   string
-	Model    string
-	BaseURL  string
 	Text     string
 	Duration int // Duration in seconds to fit the subtitles into
 }
 
-func GenerateVideoSummary(ctx context.Context, cfg Config) (string, error) {
-	opts := []openai.Option{openai.WithToken(cfg.APIKey)}
-	if cfg.BaseURL != "" {
-		opts = append(opts, openai.WithBaseURL(cfg.BaseURL))
-	}
-
-	llm, err := openai.New(opts...)
-	if err != nil {
-		return "", err
+// GenerateVideoSummary creates a concise narration summary for a video using the provided LLM.
+// The summary is designed to fit within the specified duration.
+func GenerateVideoSummary(ctx context.Context, llm LLM, cfg Config) (string, error) {
+	if cfg.Duration <= 0 {
+		return "", fmt.Errorf("duration must be positive")
 	}
 
 	maxWords := wordLimitForDuration(cfg.Duration)
@@ -47,14 +39,12 @@ func GenerateVideoSummary(ctx context.Context, cfg Config) (string, error) {
 		llms.TextParts(llms.ChatMessageTypeHuman, fmt.Sprintf("Create a short spoken summary for a %d second video. The narration must be %d words or fewer when spoken naturally. It is acceptable to be shorter, but never longer.\n\nSource text:\n%s", cfg.Duration, maxWords, cfg.Text)),
 	}
 
-	resp, err := llm.GenerateContent(ctx, contents, llms.WithModel(cfg.Model))
+	resp, err := llm.GenerateContent(ctx, contents)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to generate summary: %w", err)
 	}
 
-	text := strings.TrimSpace(resp.Choices[0].Content)
-
-	return text, nil
+	return resp, nil
 }
 
 func wordLimitForDuration(durationSeconds int) int {
@@ -73,7 +63,7 @@ func wordLimitForDuration(durationSeconds int) int {
 // ResolveLLMConfig returns the API key, model, and base URL for the configured LLM provider
 // based on environment variables and defaults.
 func ResolveLLMConfig() (apiKey, model, baseURL string, err error) {
-	provider := os.Getenv("LLM_PROVIDER")
+	provider := DetectProvider()
 	apiKey = os.Getenv("OPENAI_API_KEY")
 	model = os.Getenv("OPENAI_MODEL")
 	baseURL = os.Getenv("OPENAI_BASE_URL")
@@ -84,6 +74,13 @@ func ResolveLLMConfig() (apiKey, model, baseURL string, err error) {
 		baseURL = os.Getenv("OPENROUTER_BASE_URL")
 	}
 
+	if provider == "ollama" {
+		model = os.Getenv("OLLAMA_MODEL")
+		baseURL = os.Getenv("OLLAMA_BASE_URL")
+		// Ollama doesn't require an API key
+		return apiKey, model, baseURL, nil
+	}
+
 	if apiKey == "" {
 		return "", "", "", fmt.Errorf("missing API key for LLM provider")
 	}
@@ -92,4 +89,32 @@ func ResolveLLMConfig() (apiKey, model, baseURL string, err error) {
 		return "", "", "", fmt.Errorf("missing model for LLM provider")
 	}
 	return apiKey, model, baseURL, nil
+}
+
+// NewLLMClient creates and configures an LLM client based on the current environment.
+func NewLLMClient() (LLM, error) {
+	provider := DetectProvider()
+
+	var apiKey, model, baseURL string
+	var err error
+
+	if provider == "ollama" {
+		model = os.Getenv("OLLAMA_MODEL")
+		if model == "" {
+			model = "llama3.2" // Default Ollama model
+		}
+		baseURL = os.Getenv("OLLAMA_BASE_URL")
+	} else {
+		apiKey, model, baseURL, err = ResolveLLMConfig()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return NewClient(ClientConfig{
+		APIKey:   apiKey,
+		Model:    model,
+		BaseURL:  baseURL,
+		Provider: provider,
+	})
 }
