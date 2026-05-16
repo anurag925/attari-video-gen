@@ -1,0 +1,5 @@
+video_url: "https://www.youtube.com/watch?v=4NDZvILKOL8"
+url: "https://en.wikipedia.org/wiki/Funny_Story_(novel)" # Page to scrape for text
+# text: "Fallback direct text if no url provided"
+duration: 20
+output_name: "my-short-video.mp4"

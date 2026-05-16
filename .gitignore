@@ -19,4 +19,4 @@ coverage.out
 /video-summary-test
 
 # Generated media and working files
-/assets/
+/assets/*output*
