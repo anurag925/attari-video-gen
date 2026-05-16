@@ -8,40 +8,27 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/anurag925/attari-video-gen/internal/config"
 )
 
-// PipelineState tracks the progress of a video generation pipeline.
-// Each field represents either an artifact path or a completion flag for a pipeline step.
+// StepState tracks whether a step is done and its artifact path.
+type StepState struct {
+	Done         bool   `json:"done"`
+	ArtifactPath string `json:"artifact_path,omitempty"`
+}
+
+// PipelineState tracks the progress of a video generation pipeline using dynamic step names.
 type PipelineState struct {
-	// Signature is the hash of the input configuration, used to detect changes.
-	Signature string `json:"signature"`
-
-	// Artifact paths
-	SourceTextPath     string `json:"source_text_path,omitempty"`
-	SummarisedTextPath string `json:"summarized_text_path,omitempty"`
-	SrtSubtitlesPath   string `json:"srt_subtitles_path,omitempty"`
-	SubtitlesPath      string `json:"subtitles_path,omitempty"`
-	DownloadedPath     string `json:"downloaded_path,omitempty"`
-	CutVideoPath       string `json:"cut_video_path,omitempty"`
-	AudioPath          string `json:"audio_path,omitempty"`
-	VideoWithSubsPath  string `json:"video_with_subs_path,omitempty"`
-	FinalPath          string `json:"final_path,omitempty"`
-
-	// Completion flags
-	SourceTextDone     bool `json:"source_text_done"`
-	SummarisedTextDone bool `json:"summarized_text_done"`
-	SrtSubtitlesDone   bool `json:"srt_subtitles_done"`
-	SubtitlesDone      bool `json:"subtitles_done"`
-	DownloadDone       bool `json:"download_done"`
-	CutDone            bool `json:"cut_done"`
-	AudioDone          bool `json:"audio_done"`
-	SubtitlesBurned    bool `json:"subtitles_burned"`
-	MergeDone          bool `json:"merge_done"`
+	Signature string                `json:"signature"`
+	Steps     map[string]StepState `json:"steps,omitempty"`
 }
 
 // New creates a fresh pipeline state.
 func New() *PipelineState {
-	return &PipelineState{}
+	return &PipelineState{
+		Steps: make(map[string]StepState),
+	}
 }
 
 // Load reads a pipeline state from the given path. Returns an empty state if the file does not exist.
@@ -59,6 +46,10 @@ func Load(path string) (*PipelineState, error) {
 		return nil, err
 	}
 
+	if state.Steps == nil {
+		state.Steps = make(map[string]StepState)
+	}
+
 	return &state, nil
 }
 
@@ -72,124 +63,51 @@ func (s *PipelineState) Save(path string) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-// Savepoint writes the current state to the state file. Use after each pipeline step completes.
-func (s *PipelineState) Savepoint(statePath string) error {
-	return s.Save(statePath)
-}
-
-// IsStepDone returns true if the given completion flag is set.
-func (s *PipelineState) IsStepDone(step string) bool {
-	switch step {
-	case "source_text":
-		return s.SourceTextDone
-	case "summarized_text":
-		return s.SummarisedTextDone
-	case "srt_subtitles":
-		return s.SrtSubtitlesDone
-	case "subtitles":
-		return s.SubtitlesDone
-	case "download":
-		return s.DownloadDone
-	case "cut":
-		return s.CutDone
-	case "audio":
-		return s.AudioDone
-	case "subtitles_burned":
-		return s.SubtitlesBurned
-	case "merge":
-		return s.MergeDone
-	default:
+// IsStepDone returns true if the given step is marked as done.
+func (s *PipelineState) IsStepDone(step config.StepName) bool {
+	if s.Steps == nil {
 		return false
 	}
+	st, ok := s.Steps[step.String()]
+	return ok && st.Done
 }
 
-// SetStepDone marks the given step as complete and persists the state.
-func (s *PipelineState) SetStepDone(statePath, step string, artifactPath string) error {
-	switch step {
-	case "source_text":
-		s.SourceTextDone = true
-		s.SourceTextPath = artifactPath
-	case "summarized_text":
-		s.SummarisedTextDone = true
-		s.SummarisedTextPath = artifactPath
-	case "srt_subtitles":
-		s.SrtSubtitlesDone = true
-		s.SrtSubtitlesPath = artifactPath
-	case "subtitles":
-		s.SubtitlesDone = true
-		s.SubtitlesPath = artifactPath
-	case "download":
-		s.DownloadDone = true
-		s.DownloadedPath = artifactPath
-	case "cut":
-		s.CutDone = true
-		s.CutVideoPath = artifactPath
-	case "audio":
-		s.AudioDone = true
-		s.AudioPath = artifactPath
-	case "subtitles_burned":
-		s.SubtitlesBurned = true
-		s.VideoWithSubsPath = artifactPath
-	case "merge":
-		s.MergeDone = true
-		s.FinalPath = artifactPath
+// SetStepDone marks the given step as complete with its artifact path and persists.
+func (s *PipelineState) SetStepDone(statePath string, step config.StepName, artifactPath string) error {
+	if s.Steps == nil {
+		s.Steps = make(map[string]StepState)
 	}
-
+	s.Steps[step.String()] = StepState{Done: true, ArtifactPath: artifactPath}
 	return s.Save(statePath)
 }
 
 // GetArtifact returns the artifact path for the given step.
-func (s *PipelineState) GetArtifact(step string) string {
-	switch step {
-	case "source_text":
-		return s.SourceTextPath
-	case "summarized_text":
-		return s.SummarisedTextPath
-	case "srt_subtitles":
-		return s.SrtSubtitlesPath
-	case "subtitles":
-		return s.SubtitlesPath
-	case "download":
-		return s.DownloadedPath
-	case "cut":
-		return s.CutVideoPath
-	case "audio":
-		return s.AudioPath
-	case "subtitles_burned":
-		return s.VideoWithSubsPath
-	case "merge":
-		return s.FinalPath
-	default:
+func (s *PipelineState) GetArtifact(step config.StepName) string {
+	if s.Steps == nil {
 		return ""
 	}
+	st, ok := s.Steps[step.String()]
+	if !ok {
+		return ""
+	}
+	return st.ArtifactPath
 }
 
 // SetArtifact updates the artifact path for the given step.
-func (s *PipelineState) SetArtifact(step, path string) {
-	switch step {
-	case "source_text":
-		s.SourceTextPath = path
-	case "summarized_text":
-		s.SummarisedTextPath = path
-	case "srt_subtitles":
-		s.SrtSubtitlesPath = path
-	case "subtitles":
-		s.SubtitlesPath = path
-	case "download":
-		s.DownloadedPath = path
-	case "cut":
-		s.CutVideoPath = path
-	case "audio":
-		s.AudioPath = path
-	case "subtitles_burned":
-		s.VideoWithSubsPath = path
-	case "merge":
-		s.FinalPath = path
+func (s *PipelineState) SetArtifact(step config.StepName, path string) {
+	if s.Steps == nil {
+		s.Steps = make(map[string]StepState)
 	}
+	st, ok := s.Steps[step.String()]
+	if !ok {
+		st = StepState{}
+	}
+	st.ArtifactPath = path
+	s.Steps[step.String()] = st
 }
 
 // PathExists returns true if the artifact path for the given step exists and is a file.
-func (s *PipelineState) PathExists(step string) bool {
+func (s *PipelineState) PathExists(step config.StepName) bool {
 	path := s.GetArtifact(step)
 	if path == "" {
 		return false
@@ -207,6 +125,7 @@ func (s *PipelineState) PathExists(step string) bool {
 func (s *PipelineState) Reset() {
 	*s = PipelineState{
 		Signature: s.Signature,
+		Steps:     make(map[string]StepState),
 	}
 }
 
@@ -314,27 +233,27 @@ func (m *Manager) Save() error {
 }
 
 // CompleteStep marks a pipeline step as done with its artifact path and persists the state.
-func (m *Manager) CompleteStep(step, artifactPath string) error {
+func (m *Manager) CompleteStep(step config.StepName, artifactPath string) error {
 	return m.state.SetStepDone(m.statePath, step, artifactPath)
 }
 
 // IsStepDone checks if a pipeline step has been completed.
-func (m *Manager) IsStepDone(step string) bool {
+func (m *Manager) IsStepDone(step config.StepName) bool {
 	return m.state.IsStepDone(step)
 }
 
 // GetArtifact returns the artifact path for a completed step.
-func (m *Manager) GetArtifact(step string) string {
+func (m *Manager) GetArtifact(step config.StepName) string {
 	return m.state.GetArtifact(step)
 }
 
 // ArtifactExists checks if the artifact for a step exists on disk.
-func (m *Manager) ArtifactExists(step string) bool {
+func (m *Manager) ArtifactExists(step config.StepName) bool {
 	return m.state.PathExists(step)
 }
 
 // ShouldSkip returns true if the step is already done and the artifact exists.
-func (m *Manager) ShouldSkip(step string) (bool, string) {
+func (m *Manager) ShouldSkip(step config.StepName) (bool, string) {
 	if m.state.IsStepDone(step) && m.state.PathExists(step) {
 		return true, m.state.GetArtifact(step)
 	}

@@ -1,11 +1,11 @@
 package state
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/anurag925/attari-video-gen/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,15 +14,8 @@ func TestNew(t *testing.T) {
 	s := New()
 	assert.NotNil(t, s)
 	assert.Empty(t, s.Signature)
-	assert.False(t, s.SourceTextDone)
-	assert.False(t, s.SummarisedTextDone)
-	assert.False(t, s.DownloadDone)
-	assert.False(t, s.CutDone)
-	assert.False(t, s.AudioDone)
-	assert.False(t, s.SrtSubtitlesDone)
-	assert.False(t, s.SubtitlesDone)
-	assert.False(t, s.SubtitlesBurned)
-	assert.False(t, s.MergeDone)
+	assert.NotNil(t, s.Steps)
+	assert.Empty(t, s.Steps)
 }
 
 func TestPipelineState_SaveLoad(t *testing.T) {
@@ -31,8 +24,7 @@ func TestPipelineState_SaveLoad(t *testing.T) {
 
 	s := New()
 	s.Signature = "test-signature"
-	s.SourceTextDone = true
-	s.SourceTextPath = "/path/to/source.txt"
+	s.Steps["source_text"] = StepState{Done: true, ArtifactPath: "/path/to/source.txt"}
 
 	err := s.Save(statePath)
 	require.NoError(t, err)
@@ -40,8 +32,8 @@ func TestPipelineState_SaveLoad(t *testing.T) {
 	loaded, err := Load(statePath)
 	require.NoError(t, err)
 	assert.Equal(t, s.Signature, loaded.Signature)
-	assert.Equal(t, s.SourceTextDone, loaded.SourceTextDone)
-	assert.Equal(t, s.SourceTextPath, loaded.SourceTextPath)
+	assert.True(t, loaded.IsStepDone(config.StepSourceText))
+	assert.Equal(t, "/path/to/source.txt", loaded.GetArtifact(config.StepSourceText))
 }
 
 func TestLoad_FileNotFound(t *testing.T) {
@@ -65,39 +57,20 @@ func TestLoad_InvalidJSON(t *testing.T) {
 func TestPipelineState_IsStepDone(t *testing.T) {
 	s := New()
 
-	tests := []struct {
-		step   string
-		done   bool
-		setter func()
-	}{
-		{"source_text", false, func() {}},
-		{"summarized_text", false, func() {}},
-		{"download", false, func() {}},
-		{"cut", false, func() {}},
-		{"audio", false, func() {}},
-		{"srt_subtitles", false, func() {}},
-		{"subtitles", false, func() {}},
-		{"subtitles_burned", false, func() {}},
-		{"merge", false, func() {}},
-		{"source_text", true, func() { s.SourceTextDone = true }},
-		{"summarized_text", true, func() { s.SummarisedTextDone = true }},
-		{"download", true, func() { s.DownloadDone = true }},
-		{"cut", true, func() { s.CutDone = true }},
-		{"audio", true, func() { s.AudioDone = true }},
-		{"srt_subtitles", true, func() { s.SrtSubtitlesDone = true }},
-		{"subtitles", true, func() { s.SubtitlesDone = true }},
-		{"subtitles_burned", true, func() { s.SubtitlesBurned = true }},
-		{"merge", true, func() { s.MergeDone = true }},
+	// Initially no steps are done
+	for _, step := range config.AllSteps() {
+		assert.False(t, s.IsStepDone(step), "step %s should not be done initially", step)
 	}
 
-	for _, tt := range tests {
-		tt.setter()
-		assert.Equal(t, tt.done, s.IsStepDone(tt.step), "step: %s", tt.step)
-	}
+	// Mark source_text as done
+	s.Steps["source_text"] = StepState{Done: true, ArtifactPath: "/path/to/source.txt"}
+	assert.True(t, s.IsStepDone(config.StepSourceText))
+	assert.False(t, s.IsStepDone(config.StepDownload))
 }
 
 func TestPipelineState_IsStepDone_UnknownStep(t *testing.T) {
 	s := New()
+	// Unknown steps should return false
 	assert.False(t, s.IsStepDone("unknown_step"))
 }
 
@@ -105,62 +78,26 @@ func TestPipelineState_SetStepDone(t *testing.T) {
 	tmpDir := t.TempDir()
 	statePath := filepath.Join(tmpDir, "state.json")
 
-	tests := []struct {
-		step          string
-		artifactPath  string
-		expectedDone  bool
-		expectedPath  string
-	}{
-		{"source_text", "/path/source.txt", true, "/path/source.txt"},
-		{"summarized_text", "/path/summarized.txt", true, "/path/summarized.txt"},
-		{"download", "/path/video.mp4", true, "/path/video.mp4"},
-		{"cut", "/path/cut.mp4", true, "/path/cut.mp4"},
-		{"audio", "/path/audio.mp3", true, "/path/audio.mp3"},
-		{"srt_subtitles", "/path/sub.srt", true, "/path/sub.srt"},
-		{"subtitles", "/path/final.ass", true, "/path/final.ass"},
-		{"subtitles_burned", "/path/subtitled.mp4", true, "/path/subtitled.mp4"},
-		{"merge", "/path/final.mp4", true, "/path/final.mp4"},
-	}
+	s := New()
+	err := s.SetStepDone(statePath, config.StepSourceText, "/path/source.txt")
+	require.NoError(t, err)
+	assert.True(t, s.IsStepDone(config.StepSourceText))
+	assert.Equal(t, "/path/source.txt", s.GetArtifact(config.StepSourceText))
 
-	for _, tt := range tests {
-		s := New()
-		err := s.SetStepDone(statePath, tt.step, tt.artifactPath)
-		require.NoError(t, err)
-		assert.Equal(t, tt.expectedDone, s.IsStepDone(tt.step), "step: %s", tt.step)
-		assert.Equal(t, tt.expectedPath, s.GetArtifact(tt.step), "step: %s", tt.step)
-	}
+	err = s.SetStepDone(statePath, config.StepDownload, "/path/video.mp4")
+	require.NoError(t, err)
+	assert.True(t, s.IsStepDone(config.StepDownload))
+	assert.Equal(t, "/path/video.mp4", s.GetArtifact(config.StepDownload))
 }
 
 func TestPipelineState_GetArtifact(t *testing.T) {
 	s := New()
-	s.SourceTextPath = "/path/source.txt"
-	s.SummarisedTextPath = "/path/summarized.txt"
-	s.DownloadedPath = "/path/video.mp4"
-	s.CutVideoPath = "/path/cut.mp4"
-	s.AudioPath = "/path/audio.mp3"
-	s.SrtSubtitlesPath = "/path/sub.srt"
-	s.SubtitlesPath = "/path/final.ass"
-	s.VideoWithSubsPath = "/path/subtitled.mp4"
-	s.FinalPath = "/path/final.mp4"
+	s.Steps["source_text"] = StepState{Done: true, ArtifactPath: "/path/source.txt"}
+	s.Steps["download"] = StepState{Done: true, ArtifactPath: "/path/video.mp4"}
 
-	tests := []struct {
-		step    string
-		path    string
-	}{
-		{"source_text", s.SourceTextPath},
-		{"summarized_text", s.SummarisedTextPath},
-		{"download", s.DownloadedPath},
-		{"cut", s.CutVideoPath},
-		{"audio", s.AudioPath},
-		{"srt_subtitles", s.SrtSubtitlesPath},
-		{"subtitles", s.SubtitlesPath},
-		{"subtitles_burned", s.VideoWithSubsPath},
-		{"merge", s.FinalPath},
-	}
-
-	for _, tt := range tests {
-		assert.Equal(t, tt.path, s.GetArtifact(tt.step), "step: %s", tt.step)
-	}
+	assert.Equal(t, "/path/source.txt", s.GetArtifact(config.StepSourceText))
+	assert.Equal(t, "/path/video.mp4", s.GetArtifact(config.StepDownload))
+	assert.Empty(t, s.GetArtifact(config.StepCut))
 }
 
 func TestPipelineState_GetArtifact_UnknownStep(t *testing.T) {
@@ -171,38 +108,34 @@ func TestPipelineState_GetArtifact_UnknownStep(t *testing.T) {
 func TestPipelineState_SetArtifact(t *testing.T) {
 	s := New()
 
-	s.SetArtifact("source_text", "/new/path/source.txt")
-	assert.Equal(t, "/new/path/source.txt", s.SourceTextPath)
+	s.SetArtifact(config.StepSourceText, "/new/path/source.txt")
+	assert.Equal(t, "/new/path/source.txt", s.GetArtifact(config.StepSourceText))
 
-	s.SetArtifact("summarized_text", "/new/path/summarized.txt")
-	assert.Equal(t, "/new/path/summarized.txt", s.SummarisedTextPath)
-
-	s.SetArtifact("subtitles_burned", "/new/path/video.mp4")
-	assert.Equal(t, "/new/path/video.mp4", s.VideoWithSubsPath)
+	s.SetArtifact(config.StepSubtitlesBurned, "/new/path/video.mp4")
+	assert.Equal(t, "/new/path/video.mp4", s.GetArtifact(config.StepSubtitlesBurned))
 }
 
 func TestPipelineState_PathExists(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	s := New()
-	s.SourceTextPath = filepath.Join(tmpDir, "source.txt")
-	s.DownloadDone = true
+	s.Steps["source_text"] = StepState{ArtifactPath: filepath.Join(tmpDir, "source.txt")}
 
 	// File doesn't exist yet
-	assert.False(t, s.PathExists("source_text"))
+	assert.False(t, s.PathExists(config.StepSourceText))
 
 	// Create the file
-	f, err := os.Create(s.SourceTextPath)
+	f, err := os.Create(s.GetArtifact(config.StepSourceText))
 	require.NoError(t, err)
 	f.Close()
 
 	// Now it exists
-	assert.True(t, s.PathExists("source_text"))
+	assert.True(t, s.PathExists(config.StepSourceText))
 }
 
 func TestPipelineState_PathExists_EmptyPath(t *testing.T) {
 	s := New()
-	assert.False(t, s.PathExists("source_text"))
+	assert.False(t, s.PathExists(config.StepSourceText))
 }
 
 func TestPipelineState_PathExists_UnknownStep(t *testing.T) {
@@ -213,18 +146,13 @@ func TestPipelineState_PathExists_UnknownStep(t *testing.T) {
 func TestPipelineState_Reset(t *testing.T) {
 	s := New()
 	s.Signature = "test-signature"
-	s.SourceTextDone = true
-	s.SourceTextPath = "/path/source.txt"
-	s.DownloadDone = true
-	s.DownloadedPath = "/path/video.mp4"
+	s.Steps["source_text"] = StepState{Done: true, ArtifactPath: "/path/source.txt"}
+	s.Steps["download"] = StepState{Done: true, ArtifactPath: "/path/video.mp4"}
 
 	s.Reset()
 
 	assert.Equal(t, "test-signature", s.Signature)
-	assert.False(t, s.SourceTextDone)
-	assert.Empty(t, s.SourceTextPath)
-	assert.False(t, s.DownloadDone)
-	assert.Empty(t, s.DownloadedPath)
+	assert.Empty(t, s.Steps)
 }
 
 func TestComputeSignature(t *testing.T) {
@@ -360,8 +288,7 @@ func TestManager_LoadState_ResetsOnSignatureChange(t *testing.T) {
 	// Create initial state with signature "old-sig"
 	s := New()
 	s.Signature = "old-sig"
-	s.SourceTextDone = true
-	s.SourceTextPath = "/path/to/source.txt"
+	s.Steps["source_text"] = StepState{Done: true, ArtifactPath: "/path/to/source.txt"}
 	err := s.Save(statePath)
 	require.NoError(t, err)
 
@@ -371,8 +298,8 @@ func TestManager_LoadState_ResetsOnSignatureChange(t *testing.T) {
 	require.NoError(t, err)
 
 	// State should be reset (no step done, empty paths)
-	assert.False(t, mgr.State().SourceTextDone)
-	assert.Empty(t, mgr.State().SourceTextPath)
+	assert.False(t, mgr.State().IsStepDone(config.StepSourceText))
+	assert.Empty(t, mgr.State().GetArtifact(config.StepSourceText))
 	// Signature should be set to new signature
 	assert.Equal(t, "new-sig", mgr.State().Signature)
 }
@@ -384,8 +311,7 @@ func TestManager_LoadState_KeepsStateOnSameSignature(t *testing.T) {
 	// Create initial state with signature "same-sig"
 	s := New()
 	s.Signature = "same-sig"
-	s.SourceTextDone = true
-	s.SourceTextPath = "/path/to/source.txt"
+	s.Steps["source_text"] = StepState{Done: true, ArtifactPath: "/path/to/source.txt"}
 	err := s.Save(statePath)
 	require.NoError(t, err)
 
@@ -395,8 +321,8 @@ func TestManager_LoadState_KeepsStateOnSameSignature(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "same-sig", mgr.State().Signature)
-	assert.True(t, mgr.State().SourceTextDone)
-	assert.Equal(t, "/path/to/source.txt", mgr.State().SourceTextPath)
+	assert.True(t, mgr.State().IsStepDone(config.StepSourceText))
+	assert.Equal(t, "/path/to/source.txt", mgr.State().GetArtifact(config.StepSourceText))
 }
 
 func TestManager_LoadState_FileNotFound(t *testing.T) {
@@ -420,23 +346,21 @@ func TestManager_ShouldSkip(t *testing.T) {
 
 	t.Run("not done, file doesn't exist", func(t *testing.T) {
 		mgr := NewManager(statePath)
-		skip, _ := mgr.ShouldSkip("download")
+		skip, _ := mgr.ShouldSkip(config.StepDownload)
 		assert.False(t, skip)
 	})
 
 	t.Run("done but file doesn't exist", func(t *testing.T) {
 		mgr := NewManager(statePath)
-		mgr.state.DownloadDone = true
-		mgr.state.DownloadedPath = "/nonexistent/video.mp4"
-		skip, _ := mgr.ShouldSkip("download")
+		mgr.state.Steps["download"] = StepState{Done: true, ArtifactPath: "/nonexistent/video.mp4"}
+		skip, _ := mgr.ShouldSkip(config.StepDownload)
 		assert.False(t, skip)
 	})
 
 	t.Run("done and file exists", func(t *testing.T) {
 		mgr := NewManager(statePath)
-		mgr.state.CutDone = true
-		mgr.state.CutVideoPath = existingFile
-		skip, path := mgr.ShouldSkip("cut")
+		mgr.state.Steps["cut"] = StepState{Done: true, ArtifactPath: existingFile}
+		skip, path := mgr.ShouldSkip(config.StepCut)
 		assert.True(t, skip)
 		assert.Equal(t, existingFile, path)
 	})
@@ -449,17 +373,17 @@ func TestManager_CompleteStep(t *testing.T) {
 	mgr := NewManager(statePath)
 	mgr.state.Signature = "test-sig"
 
-	err := mgr.CompleteStep("source_text", "/path/to/source.txt")
+	err := mgr.CompleteStep(config.StepSourceText, "/path/to/source.txt")
 	require.NoError(t, err)
 
-	assert.True(t, mgr.State().SourceTextDone)
-	assert.Equal(t, "/path/to/source.txt", mgr.State().SourceTextPath)
+	assert.True(t, mgr.State().IsStepDone(config.StepSourceText))
+	assert.Equal(t, "/path/to/source.txt", mgr.State().GetArtifact(config.StepSourceText))
 
 	// Verify persisted state
 	loaded, err := Load(statePath)
 	require.NoError(t, err)
-	assert.True(t, loaded.SourceTextDone)
-	assert.Equal(t, "/path/to/source.txt", loaded.SourceTextPath)
+	assert.True(t, loaded.IsStepDone(config.StepSourceText))
+	assert.Equal(t, "/path/to/source.txt", loaded.GetArtifact(config.StepSourceText))
 }
 
 func TestManager_CompleteStep_AllSteps(t *testing.T) {
@@ -470,18 +394,18 @@ func TestManager_CompleteStep_AllSteps(t *testing.T) {
 	mgr.state.Signature = "test-sig"
 
 	steps := []struct {
-		step         string
+		step         config.StepName
 		artifactPath string
 	}{
-		{"source_text", "/path/source.txt"},
-		{"summarized_text", "/path/summarized.txt"},
-		{"download", "/path/video.mp4"},
-		{"cut", "/path/cut.mp4"},
-		{"audio", "/path/audio.mp3"},
-		{"srt_subtitles", "/path/sub.srt"},
-		{"subtitles", "/path/final.ass"},
-		{"subtitles_burned", "/path/subtitled.mp4"},
-		{"merge", "/path/final.mp4"},
+		{config.StepSourceText, "/path/source.txt"},
+		{config.StepSummarizedText, "/path/summarized.txt"},
+		{config.StepDownload, "/path/video.mp4"},
+		{config.StepCut, "/path/cut.mp4"},
+		{config.StepAudio, "/path/audio.mp3"},
+		{config.StepSrtSubtitles, "/path/sub.srt"},
+		{config.StepSubtitles, "/path/final.ass"},
+		{config.StepSubtitlesBurned, "/path/subtitled.mp4"},
+		{config.StepMerge, "/path/final.mp4"},
 	}
 
 	for _, tt := range steps {
@@ -498,14 +422,13 @@ func TestManager_Reset(t *testing.T) {
 
 	mgr := NewManager(statePath)
 	mgr.state.Signature = "old-sig"
-	mgr.state.SourceTextDone = true
-	mgr.state.SourceTextPath = "/path/source.txt"
+	mgr.state.Steps["source_text"] = StepState{Done: true, ArtifactPath: "/path/source.txt"}
 
 	mgr.Reset("new-sig")
 
 	assert.Equal(t, "new-sig", mgr.State().Signature)
-	assert.False(t, mgr.State().SourceTextDone)
-	assert.Empty(t, mgr.State().SourceTextPath)
+	assert.False(t, mgr.State().IsStepDone(config.StepSourceText))
+	assert.Empty(t, mgr.State().GetArtifact(config.StepSourceText))
 }
 
 func TestManager_Save(t *testing.T) {
@@ -514,8 +437,7 @@ func TestManager_Save(t *testing.T) {
 
 	mgr := NewManager(statePath)
 	mgr.state.Signature = "test-sig"
-	mgr.state.DownloadDone = true
-	mgr.state.DownloadedPath = "/path/video.mp4"
+	mgr.state.Steps["download"] = StepState{Done: true, ArtifactPath: "/path/video.mp4"}
 
 	err := mgr.Save()
 	require.NoError(t, err)
@@ -524,8 +446,8 @@ func TestManager_Save(t *testing.T) {
 	loaded, err := Load(statePath)
 	require.NoError(t, err)
 	assert.Equal(t, "test-sig", loaded.Signature)
-	assert.True(t, loaded.DownloadDone)
-	assert.Equal(t, "/path/video.mp4", loaded.DownloadedPath)
+	assert.True(t, loaded.IsStepDone(config.StepDownload))
+	assert.Equal(t, "/path/video.mp4", loaded.GetArtifact(config.StepDownload))
 }
 
 func TestItoa(t *testing.T) {
@@ -546,33 +468,29 @@ func TestItoa(t *testing.T) {
 	}
 }
 
-// TestJSONRoundTrip verifies that the JSON serialization is reversible
 func TestPipelineState_JSONRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
 	original := &PipelineState{
-		Signature:         "test-signature",
-		SourceTextDone:   true,
-		SourceTextPath:   "/path/to/source.txt",
-		SummarisedTextDone: true,
-		SummarisedTextPath: "/path/to/summarized.txt",
-		DownloadDone:     true,
-		DownloadedPath:   "/path/to/video.mp4",
+		Signature: "test-signature",
+		Steps: map[string]StepState{
+			"source_text":      {Done: true, ArtifactPath: "/path/to/source.txt"},
+			"summarized_text":   {Done: true, ArtifactPath: "/path/to/summarized.txt"},
+			"download":         {Done: true, ArtifactPath: "/path/to/video.mp4"},
+		},
 	}
 
 	// Serialize to JSON
-	data, err := json.MarshalIndent(original, "", "  ")
+	err := original.Save(statePath)
 	require.NoError(t, err)
 
 	// Deserialize back
-	var loaded PipelineState
-	err = json.Unmarshal(data, &loaded)
+	loaded, err := Load(statePath)
 	require.NoError(t, err)
 
 	// Compare
 	assert.Equal(t, original.Signature, loaded.Signature)
-	assert.Equal(t, original.SourceTextDone, loaded.SourceTextDone)
-	assert.Equal(t, original.SourceTextPath, loaded.SourceTextPath)
-	assert.Equal(t, original.SummarisedTextDone, loaded.SummarisedTextDone)
-	assert.Equal(t, original.SummarisedTextPath, loaded.SummarisedTextPath)
-	assert.Equal(t, original.DownloadDone, loaded.DownloadDone)
-	assert.Equal(t, original.DownloadedPath, loaded.DownloadedPath)
+	assert.True(t, loaded.IsStepDone(config.StepSourceText))
+	assert.Equal(t, "/path/to/source.txt", loaded.GetArtifact(config.StepSourceText))
 }
