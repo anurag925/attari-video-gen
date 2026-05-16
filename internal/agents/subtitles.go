@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/tmc/langchaingo/llms"
@@ -67,4 +68,28 @@ func wordLimitForDuration(durationSeconds int) int {
 	}
 
 	return limit
+}
+
+// ResolveLLMConfig returns the API key, model, and base URL for the configured LLM provider
+// based on environment variables and defaults.
+func ResolveLLMConfig() (apiKey, model, baseURL string, err error) {
+	provider := os.Getenv("LLM_PROVIDER")
+	apiKey = os.Getenv("OPENAI_API_KEY")
+	model = os.Getenv("OPENAI_MODEL")
+	baseURL = os.Getenv("OPENAI_BASE_URL")
+
+	if provider == "openrouter" {
+		model = os.Getenv("OPENROUTER_MODEL")
+		apiKey = os.Getenv("OPENROUTER_API_KEY")
+		baseURL = os.Getenv("OPENROUTER_BASE_URL")
+	}
+
+	if apiKey == "" {
+		return "", "", "", fmt.Errorf("missing API key for LLM provider")
+	}
+
+	if model == "" {
+		return "", "", "", fmt.Errorf("missing model for LLM provider")
+	}
+	return apiKey, model, baseURL, nil
 }

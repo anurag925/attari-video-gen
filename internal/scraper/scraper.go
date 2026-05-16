@@ -39,6 +39,24 @@ func Scrape(cfg Config, pageURL string) (string, error) {
 	return strings.TrimSpace(text), nil
 }
 
+// Input represents the required fields for text extraction.
+type Input struct {
+	URL  string // Page URL to scrape for text
+	Text string // Fallback: direct text input
+}
+
+// GetText returns scraped text from a URL or falls back to direct text input.
+// If Input.URL is non-empty, it scrapes the URL. Otherwise, it returns Input.Text.
+func GetText(cfg Config, input Input) (string, error) {
+	if input.URL != "" {
+		return Scrape(cfg, input.URL)
+	}
+	if input.Text == "" {
+		return "", fmt.Errorf("either url or text is required")
+	}
+	return input.Text, nil
+}
+
 func scrapeReddit(pageURL, userAgent string) (string, error) {
 	// Convert old.reddit.com or www.reddit.com to reddit.com
 	pageURL = strings.Replace(pageURL, "old.reddit.com", "www.reddit.com", 1)

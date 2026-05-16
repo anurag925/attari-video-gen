@@ -2,58 +2,21 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"flag"
-	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/anurag925/attari-video-gen/internal/agents"
+	"github.com/anurag925/attari-video-gen/internal/config"
 	"github.com/anurag925/attari-video-gen/internal/download"
 	"github.com/anurag925/attari-video-gen/internal/scraper"
+	"github.com/anurag925/attari-video-gen/internal/state"
 	"github.com/anurag925/attari-video-gen/internal/tts"
 	"github.com/anurag925/attari-video-gen/internal/video"
 	"github.com/joho/godotenv"
-	"gopkg.in/yaml.v3"
 )
-
-type Input struct {
-	VideoURL   string `yaml:"video_url"`
-	URL        string `yaml:"url"`  // Page URL to scrape for text
-	Text       string `yaml:"text"` // Fallback: direct text input
-	Duration   int    `yaml:"duration"`
-	OutputName string `yaml:"output_name"`
-}
-
-type pipelineState struct {
-	Signature string `json:"signature"`
-
-	SourceTextPath     string `json:"source_text_path,omitempty"`
-	SummarisedTextPath string `json:"summarized_text_path,omitempty"`
-	SrtSubtitlesPath   string `json:"srt_subtitles_path,omitempty"`
-	SubtitlesPath      string `json:"subtitles_path,omitempty"`
-	DownloadedPath     string `json:"downloaded_path,omitempty"`
-	CutVideoPath       string `json:"cut_video_path,omitempty"`
-	AudioPath          string `json:"audio_path,omitempty"`
-	VideoWithSubsPath  string `json:"video_with_subs_path,omitempty"`
-	FinalPath          string `json:"final_path,omitempty"`
-
-	SourceTextDone     bool `json:"source_text_done"`
-	SummarisedTextDone bool `json:"summarized_text_done"`
-	SrtSubtitlesDone   bool `json:"srt_subtitles_done"`
-	SubtitlesDone      bool `json:"subtitles_done"`
-	DownloadDone       bool `json:"download_done"`
-	CutDone            bool `json:"cut_done"`
-	AudioDone          bool `json:"audio_done"`
-	SubtitlesBurned    bool `json:"subtitles_burned"`
-	MergeDone          bool `json:"merge_done"`
-}
 
 var (
 	flagInput    string
@@ -76,20 +39,20 @@ func main() {
 		log.Fatal("error reading .env file, proceeding with environment variables only")
 	}
 
-	apiKey, model, baseURL, err := resolveLLMConfig()
+	apiKey, model, baseURL, err := agents.ResolveLLMConfig()
 	if err != nil {
 		slog.Info("Error resolving LLM config", "error", err)
 		os.Exit(1)
 	}
 
 	// Read and parse input file
-	input, err := parseInputFile(flagInput)
+	input, err := config.ParseInputFile(flagInput)
 	if err != nil {
 		slog.Info("Error reading input file", "error", err)
 		os.Exit(1)
 	}
 
-	if err := validateInput(input); err != nil {
+	if err := config.ValidateInput(input); err != nil {
 		slog.Info("Invalid input", "error", err)
 		os.Exit(1)
 	}
@@ -105,44 +68,56 @@ func main() {
 
 	slog.Info("Working directory", "path", workDir)
 
-	statePath := pipelineStatePath(workDir, input.OutputName)
-	runSignature := inputSignature(input)
-	state, err := loadPipelineState(statePath)
-	if err != nil {
+	// Initialize state manager
+	signature := state.ComputeSignature(
+		input.VideoURL,
+		input.URL,
+		input.Text,
+		state.Itoa(input.Duration),
+		input.OutputName,
+	)
+	statePath := state.StatePath(workDir, input.OutputName)
+	mgr := state.NewManager(statePath)
+	if err := mgr.LoadState(signature); err != nil {
 		slog.Info("Error loading pipeline state", "error", err)
 		os.Exit(1)
 	}
-	if state.Signature != "" && state.Signature != runSignature {
+	if mgr.State().Signature != "" && mgr.State().Signature != signature {
 		slog.Info("Input changed, resetting saved pipeline state", "path", statePath)
-		state = &pipelineState{}
+		mgr.Reset(signature)
 	}
-	state.Signature = runSignature
+	mgr.State().Signature = signature
+	if err := mgr.Save(); err != nil {
+		slog.Info("Error saving pipeline state", "error", err)
+		os.Exit(1)
+	}
 
 	// Scrape text from URL or use direct text
 	var sourceText string
-	if state.SourceTextDone && fileExists(state.SourceTextPath) {
-		sourceText, err = readTextFile(state.SourceTextPath)
+	if skip, path := mgr.ShouldSkip("source_text"); skip {
+		sourceText, err = state.ReadTextFile(path)
 		if err != nil {
 			slog.Info("Error reading saved source text", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("Skipping text fetch", "path", state.SourceTextPath)
+		slog.Info("Skipping text fetch", "path", path)
 	} else {
-		sourceText, err = getText(ctx, input)
+		sourceText, err = scraper.GetText(scraper.Config{}, scraper.Input{
+			URL:  input.URL,
+			Text: input.Text,
+		})
 		if err != nil {
 			slog.Info("Error getting text", "error", err)
 			os.Exit(1)
 		}
 
-		sourceTextPath, err := writeTextArtifact(workDir, input.OutputName, "source.txt", sourceText)
+		sourceTextPath, err := state.WriteTextArtifact(workDir, input.OutputName, "source.txt", sourceText)
 		if err != nil {
 			slog.Info("Error saving source text", "error", err)
 			os.Exit(1)
 		}
 
-		state.SourceTextPath = sourceTextPath
-		state.SourceTextDone = true
-		if err := savePipelineState(statePath, state); err != nil {
+		if err := mgr.CompleteStep("source_text", sourceTextPath); err != nil {
 			slog.Info("Error saving pipeline state", "error", err)
 			os.Exit(1)
 		}
@@ -150,8 +125,8 @@ func main() {
 
 	// Download video
 	var downloadedPath string
-	if state.DownloadDone && fileExists(state.DownloadedPath) {
-		downloadedPath = state.DownloadedPath
+	if skip, path := mgr.ShouldSkip("download"); skip {
+		downloadedPath = path
 		slog.Info("Skipping video download", "path", downloadedPath)
 	} else {
 		slog.Info("Downloading video...")
@@ -160,9 +135,7 @@ func main() {
 			slog.Info("Error downloading video", "error", err)
 			os.Exit(1)
 		}
-		state.DownloadedPath = downloadedPath
-		state.DownloadDone = true
-		if err := savePipelineState(statePath, state); err != nil {
+		if err := mgr.CompleteStep("download", downloadedPath); err != nil {
 			slog.Info("Error saving pipeline state", "error", err)
 			os.Exit(1)
 		}
@@ -171,8 +144,8 @@ func main() {
 
 	// Cut video to specified duration
 	var cutVideoPath string
-	if state.CutDone && fileExists(state.CutVideoPath) {
-		cutVideoPath = state.CutVideoPath
+	if skip, path := mgr.ShouldSkip("cut"); skip {
+		cutVideoPath = path
 		slog.Info("Skipping video cut", "path", cutVideoPath)
 	} else {
 		slog.Info("Cutting video", "duration_seconds", input.Duration)
@@ -181,9 +154,7 @@ func main() {
 			slog.Info("Error cutting video", "error", err)
 			os.Exit(1)
 		}
-		state.CutVideoPath = cutVideoPath
-		state.CutDone = true
-		if err := savePipelineState(statePath, state); err != nil {
+		if err := mgr.CompleteStep("cut", cutVideoPath); err != nil {
 			slog.Info("Error saving pipeline state", "error", err)
 			os.Exit(1)
 		}
@@ -192,8 +163,8 @@ func main() {
 
 	// Generate summarised text from source text
 	var summarizedText string
-	if state.SummarisedTextDone && fileExists(state.SummarisedTextPath) {
-		summarizedText, err = readTextFile(state.SummarisedTextPath)
+	if skip, path := mgr.ShouldSkip("summarized_text"); skip {
+		summarizedText, err = state.ReadTextFile(path)
 		if err != nil {
 			slog.Info("Error reading saved summarized text", "error", err)
 			os.Exit(1)
@@ -212,16 +183,14 @@ func main() {
 			os.Exit(1)
 		}
 		slog.Info("Video summary generated", "text_length", len(summarizedText))
-		state.SummarisedTextDone = true
 
-		summarizedTextPath, err := writeTextArtifact(workDir, input.OutputName, "summarized.txt", summarizedText)
+		summarizedTextPath, err := state.WriteTextArtifact(workDir, input.OutputName, "summarized.txt", summarizedText)
 		if err != nil {
 			slog.Info("Error saving summarized text", "error", err)
 			os.Exit(1)
 		}
 
-		state.SummarisedTextPath = summarizedTextPath
-		if err := savePipelineState(statePath, state); err != nil {
+		if err := mgr.CompleteStep("summarized_text", summarizedTextPath); err != nil {
 			slog.Info("Error saving pipeline state", "error", err)
 			os.Exit(1)
 		}
@@ -231,19 +200,17 @@ func main() {
 
 	// Generate TTS audio
 	var audioPath string
-	if state.AudioDone && fileExists(state.AudioPath) {
-		audioPath = state.AudioPath
+	if skip, path := mgr.ShouldSkip("audio"); skip {
+		audioPath = path
 		slog.Info("Skipping TTS generation", "path", audioPath)
 	} else {
 		slog.Info("Generating TTS audio...")
-		audioPath, err = generateTTS(ctx, summarizedText, workDir)
+		audioPath, err = tts.GenerateToFile(ctx, ttsConfigFromEnv(), summarizedText, workDir)
 		if err != nil {
 			slog.Info("Error generating TTS", "error", err)
 			os.Exit(1)
 		}
-		state.AudioPath = audioPath
-		state.AudioDone = true
-		if err := savePipelineState(statePath, state); err != nil {
+		if err := mgr.CompleteStep("audio", audioPath); err != nil {
 			slog.Info("Error saving pipeline state", "error", err)
 			os.Exit(1)
 		}
@@ -259,24 +226,22 @@ func main() {
 
 	// generate SRT subtitles from TTS audio
 	var srtSubtitlesPath string
-	if state.SrtSubtitlesDone && fileExists(state.SrtSubtitlesPath) {
-		srtSubtitlesPath = state.SrtSubtitlesPath
+	if skip, path := mgr.ShouldSkip("srt_subtitles"); skip {
+		srtSubtitlesPath = path
 		slog.Info("Skipping SRT subtitle generation", "path", srtSubtitlesPath)
 	} else {
-		srtSubtitlesPath, err = writeTextArtifact(workDir, input.OutputName, "sub.srt", "")
+		srtSubtitlesPath, err = state.WriteTextArtifact(workDir, input.OutputName, "sub.srt", "")
 		if err != nil {
 			slog.Info("Error creating placeholder SRT file", "error", err)
 			os.Exit(1)
 		}
-		err = video.GenerateSubtitles(state.AudioPath, srtSubtitlesPath)
+		err = video.GenerateSubtitles(mgr.GetArtifact("audio"), srtSubtitlesPath)
 		if err != nil {
 			slog.Info("Error generating SRT subtitles", "error", err)
 			os.Exit(1)
 		}
 
-		state.SrtSubtitlesPath = srtSubtitlesPath
-		state.SrtSubtitlesDone = true
-		if err := savePipelineState(statePath, state); err != nil {
+		if err := mgr.CompleteStep("srt_subtitles", srtSubtitlesPath); err != nil {
 			slog.Info("Error saving pipeline state", "error", err)
 			os.Exit(1)
 		}
@@ -285,23 +250,21 @@ func main() {
 
 	// Srt to ass subtitle
 	var assSubtitlesPath string
-	if state.SubtitlesDone && fileExists(state.SubtitlesPath) {
-		assSubtitlesPath = state.SubtitlesPath
+	if skip, path := mgr.ShouldSkip("subtitles"); skip {
+		assSubtitlesPath = path
 		slog.Info("Skipping SRT to ASS conversion", "path", assSubtitlesPath)
 	} else {
-		subtitlePath, err := writeTextArtifact(workDir, input.OutputName, "final.ass", "")
+		assSubtitlesPath, err = state.WriteTextArtifact(workDir, input.OutputName, "final.ass", "")
 		if err != nil {
 			slog.Info("Error creating placeholder ASS file", "error", err)
 			os.Exit(1)
 		}
-		err = video.ConvertSRTToASS(state.SrtSubtitlesPath, subtitlePath)
+		err = video.ConvertSRTToASS(mgr.GetArtifact("srt_subtitles"), assSubtitlesPath)
 		if err != nil {
 			slog.Info("Error converting SRT to ASS", "error", err)
 			os.Exit(1)
 		}
-		state.SubtitlesPath = subtitlePath
-		state.SubtitlesDone = true
-		if err := savePipelineState(statePath, state); err != nil {
+		if err := mgr.CompleteStep("subtitles", assSubtitlesPath); err != nil {
 			slog.Info("Error saving pipeline state", "error", err)
 			os.Exit(1)
 		}
@@ -309,38 +272,36 @@ func main() {
 
 	// Burn subtitles into the cut video.
 	var videoWithSubsPath string
-	if state.SubtitlesBurned && fileExists(state.VideoWithSubsPath) {
-		videoWithSubsPath = state.VideoWithSubsPath
+	if skip, path := mgr.ShouldSkip("subtitles_burned"); skip {
+		videoWithSubsPath = path
 		slog.Info("Skipping subtitle burn", "path", videoWithSubsPath)
 	} else {
-		subtitledOutputPath := artifactPathFromState(workDir, baseOutputName(input.OutputName)+"-subtitled.mp4", state.CutVideoPath, cutVideoPath)
-		slog.Info("Burning subtitles into video", "video", cutVideoPath, "subtitles", state.SubtitlesPath)
+		subtitledOutputPath := state.ArtifactPath(workDir, state.BaseName(input.OutputName)+"-subtitled.mp4", mgr.GetArtifact("cut"), cutVideoPath)
+		slog.Info("Burning subtitles into video", "video", cutVideoPath, "subtitles", mgr.GetArtifact("subtitles"))
 		videoWithSubsPath, err = video.AddSubtitles(ctx, video.Config{
 			WorkingDir: workDir,
 			OutputPath: subtitledOutputPath,
-		}, cutVideoPath, state.SubtitlesPath)
+		}, cutVideoPath, mgr.GetArtifact("subtitles"))
 		if err != nil {
 			slog.Info("Error burning subtitles", "error", err)
 			os.Exit(1)
 		}
 
-		state.VideoWithSubsPath = videoWithSubsPath
-		state.SubtitlesBurned = true
-		if err := savePipelineState(statePath, state); err != nil {
+		if err := mgr.CompleteStep("subtitles_burned", videoWithSubsPath); err != nil {
 			slog.Info("Error saving pipeline state", "error", err)
 			os.Exit(1)
 		}
 	}
 	if videoWithSubsPath == "" {
-		videoWithSubsPath = state.VideoWithSubsPath
+		videoWithSubsPath = mgr.GetArtifact("subtitles_burned")
 	}
 	if videoWithSubsPath == "" {
 		slog.Info("Missing subtitled video path after subtitle burn")
 		os.Exit(1)
 	}
-	if state.VideoWithSubsPath != videoWithSubsPath {
-		state.VideoWithSubsPath = videoWithSubsPath
-		if err := savePipelineState(statePath, state); err != nil {
+	if mgr.GetArtifact("subtitles_burned") != videoWithSubsPath {
+		mgr.State().SetArtifact("subtitles_burned", videoWithSubsPath)
+		if err := mgr.Save(); err != nil {
 			slog.Info("Error saving pipeline state", "error", err)
 			os.Exit(1)
 		}
@@ -349,226 +310,58 @@ func main() {
 
 	// Merge the subtitled video with the generated audio.
 	var finalPath string
-	if state.MergeDone && fileExists(state.FinalPath) {
-		finalPath = state.FinalPath
+	if skip, path := mgr.ShouldSkip("merge"); skip {
+		finalPath = path
 		slog.Info("Skipping audio merge", "path", finalPath)
 	} else {
-		finalOutputPath := artifactPathFromState(workDir, input.OutputName, state.VideoWithSubsPath, videoWithSubsPath)
+		finalOutputPath := state.ArtifactPath(workDir, input.OutputName, mgr.GetArtifact("subtitles_burned"), videoWithSubsPath)
 		slog.Info("Merging subtitled video with audio", "video", videoWithSubsPath, "audio", audioPath)
 		finalPath, err = video.MergeAudioVideo(ctx, video.Config{
 			WorkingDir: workDir,
 			OutputPath: finalOutputPath,
-		}, videoWithSubsPath, audioPath, baseOutputName(input.OutputName))
+		}, videoWithSubsPath, audioPath, state.BaseName(input.OutputName))
 		if err != nil {
 			slog.Info("Error merging audio and video", "error", err)
 			os.Exit(1)
 		}
 
-		state.FinalPath = finalPath
-		state.MergeDone = true
-		if err := savePipelineState(statePath, state); err != nil {
+		if err := mgr.CompleteStep("merge", finalPath); err != nil {
 			slog.Info("Error saving pipeline state", "error", err)
 			os.Exit(1)
 		}
 	}
 	if finalPath == "" {
-		finalPath = state.FinalPath
+		finalPath = mgr.GetArtifact("merge")
 	}
 	slog.Info("Final video ready", "path", finalPath)
 }
 
-func parseInputFile(path string) (*Input, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+func ttsConfigFromEnv() tts.Config {
+	provider := firstEnv("TTS_PROVIDER")
+	cfg := tts.Config{
+		Provider:       provider,
+		BaseURL:        firstEnv("TTS_BASE_URL", "OPENAI_BASE_URL"),
+		Model:          firstEnv("TTS_MODEL", "OPENAI_TTS_MODEL"),
+		VoiceID:        firstEnv("TTS_VOICE", "OPENAI_TTS_VOICE"),
+		ResponseFormat: firstEnv("TTS_RESPONSE_FORMAT", "OPENAI_TTS_RESPONSE_FORMAT"),
 	}
 
-	var input Input
-	if err := yaml.Unmarshal(data, &input); err != nil {
-		return nil, err
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "", tts.ProviderElevenLabs:
+		cfg.APIKey = os.Getenv("ELEVENLABS_API_KEY")
+	case tts.ProviderKokoro:
+		cfg.APIKey = firstEnv("TTS_API_KEY", "OPENAI_API_KEY")
 	}
 
-	return &input, nil
+	return cfg
 }
 
-func validateInput(input *Input) error {
-	if input.VideoURL == "" {
-		return fmt.Errorf("video_url is required")
-	}
-	if input.URL == "" && input.Text == "" {
-		return fmt.Errorf("either url or text is required")
-	}
-	if input.Duration <= 0 {
-		return fmt.Errorf("duration must be positive")
-	}
-	if input.OutputName == "" {
-		return fmt.Errorf("output_name is required")
-	}
-	return nil
-}
-
-func getText(ctx context.Context, input *Input) (string, error) {
-	// If URL is provided, scrape it
-	if input.URL != "" {
-		slog.Info("Scraping text", "url", input.URL)
-		text, err := scraper.Scrape(scraper.Config{}, input.URL)
-		if err != nil {
-			return "", fmt.Errorf("failed to scrape URL: %w", err)
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
 		}
-		slog.Info("Scraped text", "characters", len(text))
-		return text, nil
 	}
 
-	// Otherwise use direct text
-	return input.Text, nil
-}
-
-func generateTTS(ctx context.Context, text string, outputDir string) (string, error) {
-	apiKey := os.Getenv("ELEVENLABS_API_KEY")
-	if apiKey == "" {
-		return "", fmt.Errorf("ELEVENLABS_API_KEY not set")
-	}
-
-	slog.Info("check voice api key", "key", apiKey)
-
-	audioReader, err := tts.Generate(ctx, tts.Config{APIKey: apiKey}, text)
-	if err != nil {
-		return "", err
-	}
-
-	audioPath := filepath.Join(outputDir, "audio.mp3")
-	outFile, err := os.Create(audioPath)
-	if err != nil {
-		return "", err
-	}
-	defer outFile.Close()
-
-	if _, err := io.Copy(outFile, audioReader); err != nil {
-		return "", err
-	}
-
-	return audioPath, nil
-}
-
-func writeSubtitlesFile(outputDir string, outputName string, subtitles string) (string, error) {
-	return writeTextArtifact(outputDir, outputName, "subtitles.srt", subtitles)
-}
-
-func writeTextArtifact(outputDir string, outputName string, suffix string, content string) (string, error) {
-	path := filepath.Join(outputDir, baseOutputName(outputName)+"-"+suffix)
-	if err := os.WriteFile(path, []byte(content+"\n"), 0644); err != nil {
-		return "", err
-	}
-
-	return path, nil
-}
-
-func readTextFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-
-	return strings.TrimSpace(string(data)), nil
-}
-
-func baseOutputName(outputName string) string {
-	baseName := filepath.Base(outputName)
-	ext := filepath.Ext(baseName)
-	name := strings.TrimSuffix(baseName, ext)
-	if name == "" {
-		return "output"
-	}
-
-	return name
-}
-
-func pipelineStatePath(outputDir string, outputName string) string {
-	return filepath.Join(outputDir, baseOutputName(outputName)+"-progress.json")
-}
-
-func artifactPathFromState(fallbackDir string, fileName string, candidates ...string) string {
-	for _, candidate := range candidates {
-		if candidate == "" {
-			continue
-		}
-
-		return filepath.Join(filepath.Dir(candidate), fileName)
-	}
-
-	return filepath.Join(fallbackDir, fileName)
-}
-
-func loadPipelineState(path string) (*pipelineState, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &pipelineState{}, nil
-		}
-		return nil, err
-	}
-
-	var state pipelineState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, err
-	}
-
-	return &state, nil
-}
-
-func savePipelineState(path string, state *pipelineState) error {
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, data, 0644)
-}
-
-func inputSignature(input *Input) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		input.VideoURL,
-		input.URL,
-		input.Text,
-		fmt.Sprintf("%d", input.Duration),
-		input.OutputName,
-	}, "\n")))
-
-	return hex.EncodeToString(sum[:])
-}
-
-func fileExists(path string) bool {
-	if path == "" {
-		return false
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-
-	return !info.IsDir()
-}
-
-// resolveLLMConfig returns the API key, model, and base URL for the configured LLM provider based on environment variables and defaults.
-func resolveLLMConfig() (string, string, string, error) {
-	provider := os.Getenv("LLM_PROVIDER")
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	model := os.Getenv("OPENAI_MODEL")
-	baseURL := os.Getenv("OPENAI_BASE_URL")
-
-	if provider == "openrouter" {
-		model = os.Getenv("OPENROUTER_MODEL")
-		apiKey = os.Getenv("OPENROUTER_API_KEY")
-		baseURL = os.Getenv("OPENROUTER_BASE_URL")
-	}
-
-	if apiKey == "" {
-		return "", "", "", fmt.Errorf("missing API key for LLM provider")
-	}
-
-	if model == "" {
-		return "", "", "", fmt.Errorf("missing model for LLM provider")
-	}
-	return apiKey, model, baseURL, nil
+	return ""
 }
