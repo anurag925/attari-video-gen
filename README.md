@@ -351,15 +351,20 @@ curl http://localhost:8080/api/v1/artifacts
 
 ### video-maker
 
-The main CLI for running the pipeline:
+The CLI uses subcommands for different operations:
 
 ```bash
-go run ./cmd/video-maker -i <input.yaml> [-text-only]
+# Generate an input YAML template
+go run ./cmd/video-maker init -o input.yaml
+
+# Run the pipeline
+go run ./cmd/video-maker generate -i input.yaml
 ```
 
 Options:
-- `-i <path>` — Input YAML file path (required)
-- `-text-only` — Only output scraped/summarized text, skip video generation
+- `init -o <path>` — Generate input YAML template
+- `generate -i <path>` — Run the pipeline (required)
+- `generate -copy-output=false` — Skip copying final output to current directory
 
 ### Integration Tests
 
@@ -461,24 +466,34 @@ go run ./cmd/integrations/audio-merge-test -video <video> -audio <audio> -output
 
 ## Output Artifacts
 
-Pipeline outputs are stored in `assets/shorts-outputs/` with the following naming convention:
+Pipeline outputs are stored in `/tmp/attari-video-gen/` with each input having its own working directory:
 
 ```
-<output_name>-source.txt           # Scraped source text
-<output_name>-summarized.txt       # LLM-generated narration
-audio.mp3                          # TTS audio
-<output_name>-sub.srt             # SRT subtitles from Whisper
-<output_name>-final.ass           # ASS subtitles
-<output_name>-subtitled.mp4       # Video with burned-in subtitles
-<output_name>.mp4                  # Final output (merged with audio)
-<output_name>-progress.json       # Pipeline state (for resumption)
+/tmp/attari-video-gen/
+├── inputs/
+│   └── input.<signature>.yaml          # Input config (for repeat detection)
+└── assets/
+    └── <output-name>-<randomword>/     # Per-input working directory
+        ├── progress.json              # Pipeline state (for resumption)
+        ├── source.txt                 # Scraped source text
+        ├── summarized.txt             # LLM-generated narration
+        ├── video.mp4                  # Downloaded source video
+        ├── video_cut.mp4              # Trimmed video
+        ├── audio.mp3                  # TTS audio
+        ├── sub.srt                    # SRT subtitles from Whisper
+        ├── final.ass                  # ASS subtitles
+        ├── <output>-subtitled.mp4     # Video with burned-in subtitles
+        └── <output>.mp4               # Final output (merged with audio)
 ```
+
+On pipeline completion, the final output is copied to the user's current working directory.
 
 ## Development
 
 ### Running Tests
 ```bash
-go test ./...
+go test ./...                    # Run all tests
+go test -v -run TestName ./...   # Run specific test
 ```
 
 ### Dependencies
