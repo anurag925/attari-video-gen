@@ -7,10 +7,10 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/anurag925/attari-video-gen/internal/agents"
 	"github.com/anurag925/attari-video-gen/internal/config"
-	"github.com/anurag925/attari-video-gen/internal/download"
 	"github.com/anurag925/attari-video-gen/internal/processor"
 	"github.com/anurag925/attari-video-gen/internal/state"
 	"github.com/joho/godotenv"
@@ -52,6 +52,7 @@ func usage() {
 func generateCmd() {
 	flag.CommandLine = flag.NewFlagSet("generate", flag.ExitOnError)
 	flagInput := flag.CommandLine.String("i", "", "Input YAML file path")
+	flagCopyOutput := flag.CommandLine.Bool("copy-output", true, "Copy final output to current working directory")
 
 	if err := flag.CommandLine.Parse(os.Args[2:]); err != nil {
 		slog.Info("Error parsing flags", "error", err)
@@ -64,12 +65,11 @@ func generateCmd() {
 		os.Exit(1)
 	}
 
-	llm, err := agents.NewLLMClient()
-	if err != nil {
-		slog.Info("Error creating LLM client", "error", err)
+	// Ensure base directories exist
+	if err := config.EnsureBaseDirs(); err != nil {
+		slog.Info("Error creating base directories", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("LLM client created", "provider", agents.DetectProvider())
 
 	input, err := config.ParseInputFile(*flagInput)
 	if err != nil {
@@ -82,23 +82,37 @@ func generateCmd() {
 		os.Exit(1)
 	}
 
-	ctx := context.Background()
+	// Check for existing input file with same signature to resume
+	signature := input.ComputeSignature()
+	existingInputPath := filepath.Join(config.InputsDir, "input."+signature+".yaml")
+	if _, err := os.Stat(existingInputPath); err == nil {
+		// Found existing input, load it to get workDir
+		existingInput, err := config.ParseInputFile(existingInputPath)
+		if err == nil && existingInput.WorkDir != "" {
+			input.WorkDir = existingInput.WorkDir
+			slog.Info("Resuming from existing input", "work_dir", input.WorkDir)
+		}
+	}
 
-	workDir, err := download.WorkingDir()
+	// Ensure work directory exists
+	workDir, err := input.EnsureWorkDir()
 	if err != nil {
-		slog.Info("Error getting working directory", "error", err)
+		slog.Info("Error creating work directory", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("Working directory", "path", workDir)
 
-	signature := state.ComputeSignature(
-		input.VideoURL,
-		input.URL,
-		input.Text,
-		state.Itoa(input.Duration),
-		input.OutputName,
-	)
-	statePath := state.StatePath(workDir, input.OutputName)
+	// Save input to inputs folder with signature
+	inputPath := filepath.Join(config.InputsDir, "input."+signature+".yaml")
+	if err := input.SaveInput(inputPath); err != nil {
+		slog.Info("Error saving input file", "error", err)
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+
+	// Initialize state
+	statePath := filepath.Join(workDir, "progress.json")
 	mgr := state.NewManager(statePath)
 	if err := mgr.LoadState(signature); err != nil {
 		slog.Info("Error loading pipeline state", "error", err)
@@ -114,6 +128,15 @@ func generateCmd() {
 		os.Exit(1)
 	}
 
+	// Create LLM client
+	llm, err := agents.NewLLMClient()
+	if err != nil {
+		slog.Info("Error creating LLM client", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("LLM client created", "provider", agents.DetectProvider())
+
+	// Process steps
 	proc := processor.New(mgr, input, workDir, llm)
 	proc.RegisterDefaultHandlers()
 
@@ -122,7 +145,45 @@ func generateCmd() {
 		os.Exit(1)
 	}
 
-	slog.Info("Pipeline completed", "output", mgr.GetArtifact(config.StepMerge))
+	finalPath := mgr.GetArtifact(config.StepMerge)
+	if finalPath == "" {
+		slog.Info("No final output found")
+		os.Exit(1)
+	}
+
+	slog.Info("Pipeline completed", "output", finalPath)
+
+	// Copy final output to user's current working directory if requested
+	if *flagCopyOutput {
+		cwd, err := os.Getwd()
+		if err == nil {
+			finalName := input.OutputName
+			destPath := filepath.Join(cwd, finalName)
+			if err := copyFile(finalPath, destPath); err != nil {
+				slog.Info("Error copying output to CWD", "error", err)
+			} else {
+				slog.Info("Output copied to current directory", "path", destPath)
+			}
+		}
+	}
+}
+
+// copyFile copies a file from src to dst.
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = dstFile.ReadFrom(srcFile)
+	return err
 }
 
 func initCmd() {
