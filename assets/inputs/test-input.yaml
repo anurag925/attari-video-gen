@@ -1,0 +1,27 @@
+# Video generation pipeline configuration
+video_url: "https://www.youtube.com/watch?v=VIDEO_ID"
+url: "https://example.com/page-to-scrape"  # Page to scrape for text
+# text: "Fallback direct text if no url provided"
+duration: 20  # Target video duration in seconds
+output_name: "output.mp4"
+
+# Pipeline steps (order matters, set enabled: false to skip)
+steps:
+  - name: source_text
+    enabled: true
+  - name: download
+    enabled: true
+  - name: cut
+    enabled: true
+  - name: summarized_text
+    enabled: true
+  - name: audio
+    enabled: true
+  - name: srt_subtitles
+    enabled: true
+  - name: subtitles
+    enabled: true
+  - name: subtitles_burned
+    enabled: true
+  - name: merge
+    enabled: true

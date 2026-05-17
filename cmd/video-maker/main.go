@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -15,24 +16,52 @@ import (
 	"github.com/joho/godotenv"
 )
 
-var (
-	flagInput    string
-	flagTextOnly bool
-)
-
 func main() {
-	flag.StringVar(&flagInput, "i", "", "Input YAML file path")
-	flag.BoolVar(&flagTextOnly, "text-only", false, "Only output scraped/summarized text, skip video generation")
-	flag.Parse()
+	if err := godotenv.Load(); err != nil {
+		log.Fatal("error reading .env file, proceeding with environment variables only")
+	}
 
-	if flagInput == "" {
-		slog.Info("Usage: video-maker -i <input.yaml>")
-		flag.Usage()
+	if len(os.Args) < 2 {
+		usage()
 		os.Exit(1)
 	}
 
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("error reading .env file, proceeding with environment variables only")
+	switch os.Args[1] {
+	case "init":
+		initCmd()
+	case "generate", "run":
+		generateCmd()
+	default:
+		usage()
+		os.Exit(1)
+	}
+}
+
+func usage() {
+	fmt.Println("Usage: video-maker <command> [options]")
+	fmt.Println("")
+	fmt.Println("Commands:")
+	fmt.Println("  init       Generate an input YAML template")
+	fmt.Println("  generate   Run the video generation pipeline")
+	fmt.Println("")
+	fmt.Println("Examples:")
+	fmt.Println("  video-maker init -o input.yaml")
+	fmt.Println("  video-maker generate -i input.yaml")
+}
+
+func generateCmd() {
+	flag.CommandLine = flag.NewFlagSet("generate", flag.ExitOnError)
+	flagInput := flag.CommandLine.String("i", "", "Input YAML file path")
+
+	if err := flag.CommandLine.Parse(os.Args[2:]); err != nil {
+		slog.Info("Error parsing flags", "error", err)
+		os.Exit(1)
+	}
+
+	if *flagInput == "" {
+		slog.Info("Usage: video-maker generate -i <input.yaml>")
+		flag.Usage()
+		os.Exit(1)
 	}
 
 	llm, err := agents.NewLLMClient()
@@ -42,7 +71,7 @@ func main() {
 	}
 	slog.Info("LLM client created", "provider", agents.DetectProvider())
 
-	input, err := config.ParseInputFile(flagInput)
+	input, err := config.ParseInputFile(*flagInput)
 	if err != nil {
 		slog.Info("Error reading input file", "error", err)
 		os.Exit(1)
@@ -93,5 +122,35 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("Pipeline completed", "output", mgr.GetArtifact("merge"))
+	slog.Info("Pipeline completed", "output", mgr.GetArtifact(config.StepMerge))
+}
+
+func initCmd() {
+	flag.CommandLine = flag.NewFlagSet("init", flag.ExitOnError)
+	flagOutput := flag.CommandLine.String("o", "", "Output YAML file path")
+
+	if err := flag.CommandLine.Parse(os.Args[2:]); err != nil {
+		slog.Info("Error parsing flags", "error", err)
+		os.Exit(1)
+	}
+
+	if *flagOutput == "" {
+		slog.Info("Usage: video-maker init -o <output.yaml>")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	data, err := config.DefaultInputTemplate()
+	if err != nil {
+		log.Fatal("Error generating template:", err)
+	}
+
+	if err := os.WriteFile(*flagOutput, data, 0644); err != nil {
+		log.Fatal("Error writing file:", err)
+	}
+
+	slog.Info("Generated input template", "path", *flagOutput)
+	fmt.Println("Created:", *flagOutput)
+	fmt.Println("\nEdit the file and run:")
+	fmt.Printf("  video-maker generate -i %s\n", *flagOutput)
 }

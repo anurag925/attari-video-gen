@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"text/template"
 
 	"gopkg.in/yaml.v3"
 )
@@ -125,4 +127,38 @@ func (input *Input) EnsureSteps() []Step {
 		return DefaultSteps()
 	}
 	return input.Steps
+}
+
+const inputTemplate = `# Video generation pipeline configuration
+video_url: "https://www.youtube.com/watch?v=VIDEO_ID"
+url: "https://example.com/page-to-scrape"  # Page to scrape for text
+# text: "Fallback direct text if no url provided"
+duration: 20  # Target video duration in seconds
+output_name: "output.mp4"
+
+# Pipeline steps (order matters, set enabled: false to skip)
+steps:
+{{- range .Steps}}
+  - name: {{ .Name }}
+    enabled: {{ .Enabled }}
+{{- end}}
+`
+
+// DefaultInputTemplate returns a default YAML template for input configuration.
+func DefaultInputTemplate() ([]byte, error) {
+	tmpl, err := template.New("input").Parse(inputTemplate)
+	if err != nil {
+		return nil, err
+	}
+
+	input := &Input{
+		Steps: DefaultSteps(),
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, input); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
 }
